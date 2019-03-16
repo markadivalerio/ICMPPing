@@ -68,7 +68,7 @@ def receiveOnePing(mySocket, ID, timeout, destAddr):
         #Fetch the ICMP header from the IP packet
         
         icmp_header = recPacket[20:28]
-        # type, code, checksum, packet_id, sequence
+        # (type, code, checksum, packet_id, sequence)
         icmp = list(struct.unpack('bbHHh', icmp_header))
 
         if(icmp[0] != 8 and icmp[1] != 0):
@@ -85,7 +85,6 @@ def receiveOnePing(mySocket, ID, timeout, destAddr):
         else:
             icmp.append('Different ID')
             return icmp
-
 
         #Fill in end
         timeLeft = timeLeft - howLongInSelect
@@ -153,16 +152,18 @@ def calcRTTStats(rtt):
         total += triptime
     if valid_count:
         average = total/valid_count
+    packetloss = ((valid_count-len(rtt))/len(rtt))
 
     print("RTT min / max / avg / packetloss")
-    print("{} / {} / {} / {} %".format(minimum, maximum, average,
-        ((valid_count-len(rtt))/len(rtt))))
+    print("{} / {} / {} / {} %".format(minimum, maximum, average, packetloss))
+    return (minimum, maximum, average, packetloss)
     
 def ping(host, timeout=1, count=10):
     # timeout=1 means: If one second goes by without a reply from the server,
     # the client assumes that either the client's ping or the server's pong is lost
     dest = gethostbyname(host)
     print("Pinging " + dest + " using Python:")
+    print("[type, code, checksum, packet_id, seq, RTT]")
     # Send ping requests to a server separated by approximately one second
     # while 1 :
     #     delay = doOnePing(dest, timeout)
@@ -177,20 +178,25 @@ def ping(host, timeout=1, count=10):
         rtt.append(delay)
         time.sleep(1)
 
-    calcRTTStats(rtt)
+    return calcRTTStats(rtt)
     
 
-tests = {
-    "local": "localhost",
-    "Google": "google.com",
-    "UK": "bbc.co.uk",
-    "Japan": "rakuten.co.jp",
-    "Australia": "commbank.com.au",
-    "Africa": "lol.co.za"
-}
+tests = [
+    ["local", "localhost"],
+    ["North America", "google.com"],
+    ["South America", "rnp.br"],
+    ["UK", "bbc.co.uk"],
+    ["Japan", "rakuten.co.jp"],
+    ["Australia", "commbank.com.au"],
+    ["Africa", "lol.co.za"]
+]
 
-for name,test in tests.items():
+for test in tests:
     print("")
-    print(name+": "+test)
-    ping(test)
+    print(test[0]+": "+test[1])
+    try:
+        ping(test[1])
+    except Exception as e:
+        print("Error - {}".format(e))
+    
 print("")
