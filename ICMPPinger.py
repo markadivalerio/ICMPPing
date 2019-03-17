@@ -49,16 +49,37 @@ def checksum(string):
     answer = answer >> 8 | (answer << 8 & 0xff00)
     return answer
     
+def to_dict(icmp_header):
+    icmp = {
+            "type": icmp_header[0],
+            "code": icmp_header[1],
+            "checksum": icmp_header[2],
+            "packet_id": icmp_header[3],
+            "sequence": icmp_header[4],
+            "rtt": 0,
+            "error": ""
+        }
+    return icmp
+
 def receiveOnePing(mySocket, ID, timeout, destAddr):
     timeLeft = timeout
     
-    icmp = []
+    icmp = {
+            "type": None,
+            "code": None,
+            "checksum": None,
+            "packet_id": None,
+            "sequence": None,
+            "rtt": None,
+            "error": None
+        }
+
     while 1: 
         startedSelect = time.time()
         whatReady = select.select([mySocket], [], [], timeLeft)
         howLongInSelect = (time.time() - startedSelect)
         if whatReady[0] == []: # Timeout
-            icmp.append("Request timed out.")
+            icmp['error'] = "Request timed out."
             return icmp
     
         timeReceived = time.time() 
@@ -66,39 +87,36 @@ def receiveOnePing(mySocket, ID, timeout, destAddr):
         
         #Fill in start
         #Fetch the ICMP header from the IP packet
+        ICMP_ECHO_REPLY = recPacket[20:28]
+        icmp = to_dict(struct.unpack('bbHHh', ICMP_ECHO_REPLY))
         
-        icmp_header = recPacket[20:28]
-        # (type, code, checksum, packet_id, sequence)
-        icmp = list(struct.unpack('bbHHh', icmp_header))
-
-        if(icmp[0] != 8 and icmp[1] != 0):
-            try:
-                icmp.append(ERROR_CODES[str(icmp[0])][icmp[1]])
-            except Exception:
-                icmp.append("Unknown error Type+Code")
-            return icmp
-        elif icmp[3] == ID:
+        if icmp['packet_id'] == ID:
             bytes_as_dbl = struct.calcsize('d')
             time_sent = struct.unpack('d', recPacket[28:28 + bytes_as_dbl])[0]
-            icmp.append(timeReceived - time_sent)
+            icmp['rtt'] = (timeReceived - time_sent)
+            if(icmp['type'] != 8 and icmp['code'] != 0):
+                try:
+                    icmp['error'] = ERROR_CODES[str(icmp['type'])][icmp['code']]
+                except Exception:
+                    icmp['error'] = "Unknown Error Type, Code ({}, {})".format(icmp)
             return icmp
         else:
-            icmp.append('Different ID')
+            icmp['error'] = 'Different ID'
             return icmp
 
         #Fill in end
         timeLeft = timeLeft - howLongInSelect
         if timeLeft <= 0:
-            icmp.append("Request timed out.")
+            icmp['error'] = "Request timed out."
             return icmp
     
-def sendOnePing(mySocket, destAddr, ID):
+def sendOnePing(mySocket, destAddr, ID, seq=1):
     # Header is type (8), code (8), checksum (16), id (16), sequence (16)
     
     myChecksum = 0
     # Make a dummy header with a 0 checksum
     # struct -- Interpret strings as packed binary data
-    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
+    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, seq)
     data = struct.pack("d", time.time())
     # Calculate the checksum on the data and the dummy header.
     myChecksum = checksum(str(header + data))
@@ -110,14 +128,14 @@ def sendOnePing(mySocket, destAddr, ID):
     else:
         myChecksum = htons(myChecksum)
         
-    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
+    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, seq)
     packet = header + data
     
     mySocket.sendto(packet, (destAddr, 1)) # AF_INET address must be tuple, not str
     # Both LISTS and TUPLES consist of a number of objects
     # which can be referenced by their position number within the object.
     
-def doOnePing(destAddr, timeout): 
+def doOnePing(destAddr, timeout, seq=1):
     icmp = getprotobyname("icmp")
     # SOCK_RAW is a powerful socket type. For more details:   
 #    http://sock-raw.org/papers/sock_raw
@@ -125,37 +143,34 @@ def doOnePing(destAddr, timeout):
     mySocket = socket(AF_INET, SOCK_RAW, icmp)
     
     myID = os.getpid() & 0xFFFF  # Return the current process i
-    sendOnePing(mySocket, destAddr, myID)
+    sendOnePing(mySocket, destAddr, myID, seq)
     icmp_results = receiveOnePing(mySocket, myID, timeout, destAddr)
-    print(icmp_results)
     mySocket.close()
-    return icmp_results[-1]
+    return icmp_results
 
-def calcRTTStats(rtt):
+def calcRTTStats(rtts):
     '''
-    calculates the min, max, average, mdev of RTT times
+    calculates the min, max, average and packetloss of RTT times
     '''
     minimum = 1.0
     maximum = 0.0
     average = 0.0
     total = 0.0
-    valid_count = len(rtt)
+    valid_count = len(rtts)
 
-    for triptime in rtt:
-        try:
-            float(triptime)
-        except ValueError:
+    for rtt in rtts:
+        if rtt is None:
             valid_count -= 1
             continue
-        minimum = min(minimum, triptime)
-        maximum = max(maximum, triptime)
-        total += triptime
+        minimum = min(minimum, rtt)
+        maximum = max(maximum, rtt)
+        total += rtt
     if valid_count:
         average = total/valid_count
-    packetloss = ((valid_count-len(rtt))/len(rtt))
+    packetloss = ((valid_count-len(rtts))/len(rtts))
 
     print("RTT min / max / avg / packetloss")
-    print("{} / {} / {} / {} %".format(minimum, maximum, average, packetloss))
+    print("{:f} / {:f} / {:f} / {:f} %".format(minimum, maximum, average, packetloss))
     return (minimum, maximum, average, packetloss)
     
 def ping(host, timeout=1, count=10):
@@ -163,22 +178,24 @@ def ping(host, timeout=1, count=10):
     # the client assumes that either the client's ping or the server's pong is lost
     dest = gethostbyname(host)
     print("Pinging " + dest + " using Python:")
-    print("[type, code, checksum, packet_id, seq, RTT]")
-    # Send ping requests to a server separated by approximately one second
-    # while 1 :
-    #     delay = doOnePing(dest, timeout)
-    #     print(delay)
-    #     time.sleep(1)# one second
-    # return delay
+    print("[type, code, checksum, packet_id, sequece] RTT, error(if any)")
     
-    rtt = []
+    # Send ping requests to a server separated by approximately one second
+    rtts = []
     for i in range(count):
-        delay = doOnePing(dest, timeout)
-        # print(delay)
-        rtt.append(delay)
-        time.sleep(1)
+        icmp = doOnePing(dest, timeout, (i+1))
+        print('[{} {} {} {} {}] time = {:f}s {}'.format(
+            icmp['type'],
+            icmp['code'],
+            icmp['checksum'],
+            icmp['packet_id'],
+            icmp['sequence'],
+            "N/A" if icmp['rtt'] is None else icmp['rtt'],
+            icmp['error']))
+        rtts.append(icmp['rtt'])
+        time.sleep(1) # one second
 
-    return calcRTTStats(rtt)
+    return calcRTTStats(rtts)
     
 
 tests = [
